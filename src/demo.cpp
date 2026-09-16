@@ -173,6 +173,9 @@ ToLaserscanMessagePublish(
   static rclcpp::Time end_scan_time;
   static bool first_scan = true;
 
+  // Use a static fixed beam size so it never fluctuates and breaks slam_toolbox
+  static int fixed_beam_size = 0;
+
   start_scan_time = node->now();
   scan_time = (start_scan_time.seconds() - end_scan_time.seconds());
 
@@ -181,14 +184,25 @@ ToLaserscanMessagePublish(
     end_scan_time = start_scan_time;
     return;
   }
-  // Adjust the parameters according to the demand
+
   angle_min = 0;
   angle_max = (2 * M_PI);
   range_min = 0.02;
   range_max = 25;
-  int beam_size = static_cast<int>(src.size());
+
+  // Initialize fixed_beam_size on the first valid scan received
+  if (fixed_beam_size == 0 && !src.empty()) {
+    fixed_beam_size = static_cast<int>(src.size());
+    RCLCPP_INFO(
+      node->get_logger(), "Initialized fixed LiDAR beam size to: %d", fixed_beam_size);
+  }
+  if (fixed_beam_size <= 1) {
+    fixed_beam_size = 450; // Fallback safety default
+  }
+
+  int beam_size = fixed_beam_size;
   angle_increment = (angle_max - angle_min) / (float)(beam_size - 1);
-  // Calculate the number of scanning points
+
   if (lidar_spin_freq > 0) {
     sensor_msgs::msg::LaserScan output;
     output.header.stamp = start_scan_time;
@@ -198,29 +212,24 @@ ToLaserscanMessagePublish(
     output.range_min = range_min;
     output.range_max = range_max;
     output.angle_increment = angle_increment;
-    if (beam_size <= 1) {
-      output.time_increment = 0;
-    } else {
-      output.time_increment = static_cast<float>(scan_time / (double)(beam_size - 1));
-    }
+    output.time_increment = static_cast<float>(scan_time / (double)(beam_size - 1));
     output.scan_time = scan_time;
-    // First fill all the data with Nan
+
+    // First fill all data with NaN
     output.ranges.assign(beam_size, std::numeric_limits<float>::quiet_NaN());
     output.intensities.assign(beam_size, std::numeric_limits<float>::quiet_NaN());
+
     for (auto point : src) {
-      float range = point.distance / 1000.f; // distance unit transform to meters
-      float intensity = point.intensity;     // laser receive intensity
+      float range = point.distance / 1000.f; // convert mm to meters
+      float intensity = point.intensity;
       float dir_angle = point.angle;
 
-      if ((point.distance == 0) &&
-          (point.intensity ==
-           0)) { // filter is handled to  0, Nan will be assigned variable.
+      if ((point.distance == 0) && (point.intensity == 0)) {
         range = std::numeric_limits<float>::quiet_NaN();
         intensity = std::numeric_limits<float>::quiet_NaN();
       }
 
-      if (setting.enable_angle_crop_func) { // Angle crop setting, Mask data within the
-                                            // set angle range
+      if (setting.enable_angle_crop_func) {
         if ((dir_angle >= setting.angle_crop_min) &&
             (dir_angle <= setting.angle_crop_max)) {
           range = std::numeric_limits<float>::quiet_NaN();
@@ -228,39 +237,30 @@ ToLaserscanMessagePublish(
         }
       }
 
-      float angle =
-        ANGLE_TO_RADIAN(dir_angle); // Lidar angle unit form degree transform to radian
+      float angle = ANGLE_TO_RADIAN(dir_angle);
       int index = static_cast<int>(ceil((angle - angle_min) / angle_increment));
-      if (index < beam_size) {
-        if (index < 0) {
-          RCLCPP_ERROR(node->get_logger(),
-                       "error index: %d, beam_size: %d, angle: %f, output.angle_min: %f, "
-                       "output.angle_increment: %f",
-                       index,
-                       beam_size,
-                       angle,
-                       angle_min,
-                       angle_increment);
-        }
 
+      // Safety bounds check to prevent out-of-range crashes if src.size() exceeds
+      // fixed_beam_size
+      if (index >= beam_size) {
+        index = beam_size - 1;
+      }
+
+      if (index >= 0 && index < beam_size) {
         if (setting.laser_scan_dir) {
           int index_anticlockwise = beam_size - index - 1;
-          // If the current content is Nan, it is assigned directly
           if (std::isnan(output.ranges[index_anticlockwise])) {
             output.ranges[index_anticlockwise] = range;
-          } else { // Otherwise, only when the distance is less than the current
-                   //   value, it can be re assigned
+          } else {
             if (range < output.ranges[index_anticlockwise]) {
               output.ranges[index_anticlockwise] = range;
             }
           }
           output.intensities[index_anticlockwise] = intensity;
         } else {
-          // If the current content is Nan, it is assigned directly
           if (std::isnan(output.ranges[index])) {
             output.ranges[index] = range;
-          } else { // Otherwise, only when the distance is less than the current
-                   //   value, it can be re assigned
+          } else {
             if (range < output.ranges[index]) {
               output.ranges[index] = range;
             }
