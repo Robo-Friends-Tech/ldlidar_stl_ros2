@@ -19,8 +19,8 @@
  * limitations under the License.
  */
 
-#include "ldlidar_driver.h"
 #include "ros2_api.h"
+#include "ldlidar_driver.h"
 
 void ToLaserscanMessagePublish(
   ldlidar::Points2D& src,
